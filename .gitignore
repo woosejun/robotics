@@ -1,0 +1,14 @@
+# AI Models
+*.pt
+*.weights
+*.engine
+*.onnx
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+
+# OS
+.DS_Store
