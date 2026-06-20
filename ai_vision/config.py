@@ -51,3 +51,14 @@ LOST_LEFT_TIME = 5.0
 # Stream
 # =========================================================
 JPEG_QUALITY = 45
+
+# =========================================================
+# Robot UART
+# =========================================================
+ROBOT_SERIAL_ENABLED = True
+
+ROBOT_SERIAL_PORT = "/dev/ttyTHS1"
+
+ROBOT_SERIAL_BAUD = 115200
+
+ROBOT_SERIAL_DT = 0.05

@@ -10,6 +10,7 @@ import config
 from camera import camera_thread
 from inference import inference_thread
 from controller import control_thread
+from robot_comm import robot_comm_thread
 from visualization import draw_frame
 
 # =========================================================
@@ -229,6 +230,18 @@ if __name__ == "__main__":
     ctrl_t.daemon = True
 
     ctrl_t.start()
+
+    print(
+        "[INFO] Robot UDP 스레드 시작"
+    )
+
+    robot_t = threading.Thread(
+        target=robot_comm_thread
+    )
+
+    robot_t.daemon = True
+
+    robot_t.start()
 
     print(
         "[INFO] Flask 서버 시작"
