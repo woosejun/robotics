@@ -1,5 +1,7 @@
 import cv2
 import glob
+import os
+import subprocess
 import sys
 import time
 
@@ -9,6 +11,52 @@ import shared_state as state
 # =========================================================
 # Camera Open
 # =========================================================
+def is_capture_device(device):
+    if not os.path.exists(device):
+        return False
+
+    try:
+        result = subprocess.run(
+            [
+                "v4l2-ctl",
+                "--device",
+                device,
+                "--all",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.SubprocessError):
+        return True
+
+    output = result.stdout + result.stderr
+
+    if result.returncode != 0:
+        return True
+
+    if "Device Caps" in output:
+        device_caps = output.split("Device Caps", 1)[1]
+        return "Video Capture" in device_caps
+
+    return "Video Capture" in output
+
+
+def get_camera_devices():
+    devices = sorted(
+        glob.glob("/dev/video*")
+    )
+
+    capture_devices = [
+        device
+        for device in devices
+        if is_capture_device(device)
+    ]
+
+    return capture_devices or devices or ["/dev/video0"]
+
+
 def make_gst_pipeline(device):
 
     return (
@@ -48,15 +96,7 @@ def configure_capture(capture):
 
 def open_camera():
 
-    devices = sorted(
-        glob.glob("/dev/video*")
-    )
-
-    if not devices:
-
-        devices = [
-            "/dev/video0"
-        ]
+    devices = get_camera_devices()
 
     print(
         "[INFO] 카메라 후보:",
@@ -102,12 +142,19 @@ def open_camera():
 
     return None
 
+
+def print_camera_help():
+    print("[HINT] /dev/video0 busy이면 카메라를 쓰는 프로그램을 먼저 닫으세요.")
+    print("[HINT] 확인: sudo fuser -v /dev/video0")
+    print("[HINT] 종료: sudo fuser -k /dev/video0")
+
 print("[INFO] 카메라 오픈 중...")
 
 cap = open_camera()
 
 if cap is None:
     print("[CRITICAL] 카메라 실패")
+    print_camera_help()
 
     sys.exit(1)
 

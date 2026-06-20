@@ -40,7 +40,8 @@
 ---
 
 ## 📁 폴더 구조 (Project Structure)
-*   `/ai_vision`: YOLO 모델, TensorRT 변환 스크립트, 객체 추적 코드
-*   `/sensor_uwb`: DWM3000 드라이버, 거리 측정 및 시리얼 전송 펌웨어
-*   `/motor_control`: 메카넘 휠 운동학(Kinematics) 반영 주행 제어 코드
-*   `/docs`: 시스템 블록도, 회로도, 부품 사양서
+*   `/ai_vision`: 카메라 입력, YOLO 추론, 추적 제어, Flask 모니터링 코드
+*   `/ai_vision/models`: YOLO/TensorRT 모델 파일 (`.pt`, `.onnx`, `.engine`)
+*   `/sensor_uwb`: DWM3000 UWB 거리 측정 코드 및 관련 자료
+*   `/motor_control`: ESP32 기반 메카넘 휠 주행 제어 펌웨어
+*   `/docs`: 시스템 설명, 작업 기록, 레거시 실험 코드

@@ -16,21 +16,44 @@ BAUD_RATES = {
     115200: termios.B115200,
 }
 
-ROBOT_COMMANDS = frozenset("FBLRQEZXCKS")
+ROBOT_COMMANDS = frozenset("FBLRCKS")
+
+COMMAND_ALIASES = {
+    "W": "F",  # keyboard forward
+    "A": "L",  # keyboard left
+    "D": "R",  # keyboard right
+    "X": "B",  # keyboard backward; S is kept as stop
+}
+
+COMMAND_DESCRIPTIONS = {
+    "F": "forward",
+    "B": "backward",
+    "L": "left",
+    "R": "right",
+    "C": "clockwise rotate",
+    "K": "counter-clockwise rotate",
+    "S": "stop",
+}
 
 
-def encode_command(command):
+def normalize_command(command):
     if not isinstance(command, str) or len(command) != 1:
         raise ValueError(
             f"지원하지 않는 로봇 명령: {command!r} (명령은 단일 문자여야 합니다)"
         )
 
     command = command.upper()
+    command = COMMAND_ALIASES.get(command, command)
 
     if command not in ROBOT_COMMANDS:
-        raise ValueError(f"지원하지 않는 로봇 명령: {command}")
+        allowed = ", ".join(sorted(ROBOT_COMMANDS | frozenset(COMMAND_ALIASES)))
+        raise ValueError(f"지원하지 않는 로봇 명령: {command} (허용: {allowed})")
 
-    return command.encode("ascii")
+    return command
+
+
+def encode_command(command):
+    return normalize_command(command).encode("ascii")
 
 
 def open_serial_port(port=None, baud=None):
@@ -104,19 +127,28 @@ def set_connection_status(connected, command=""):
 def verify_robot_connection(timeout=3.0, verbose=False, command="S"):
     """Send one command and wait for the matching ESP32 ACK."""
     fd = open_serial_port()
+    command = normalize_command(command)
     encoded_command = encode_command(command)
     deadline = time.monotonic() + timeout
+    next_send_time = 0.0
     buffer = b""
 
     try:
-        os.write(fd, encoded_command)
-
         while time.monotonic() < deadline:
-            wait = max(0.0, deadline - time.monotonic())
+            now = time.monotonic()
+
+            if now >= next_send_time:
+                os.write(fd, encoded_command)
+                next_send_time = now + 0.25
+
+                if verbose:
+                    print(f"[TX] {command}")
+
+            wait = min(0.1, max(0.0, deadline - time.monotonic()))
             readable, _, _ = select.select([fd], [], [], wait)
 
             if not readable:
-                break
+                continue
 
             lines, buffer = read_serial_lines(fd, buffer)
 
@@ -159,7 +191,9 @@ def run_serial_session():
                 )
                 command = "S"
 
-            if command.upper() not in ROBOT_COMMANDS:
+            try:
+                command = normalize_command(command)
+            except ValueError:
                 print(
                     "[WARNING] shared_state.motor_command가 유효하지 않은 명령입니다:",
                     repr(command),
@@ -247,9 +281,11 @@ def main():
     )
     parser.add_argument(
         "--command",
-        choices=sorted(ROBOT_COMMANDS),
         default="S",
-        help="시험할 모터 명령, 기본값: S(정지)",
+        help=(
+            "시험할 모터 명령. 기본값: S(정지). "
+            "허용: F/B/L/R/C/K/S, 별칭: W=F, A=L, D=R, X=B"
+        ),
     )
     args = parser.parse_args()
 

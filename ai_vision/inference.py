@@ -14,6 +14,7 @@ print("[INFO] TensorRT 엔진 로드 중...")
 
 model_path = os.path.join(
     os.path.dirname(__file__),
+    "models",
     "yolov8n.engine"
 )
 

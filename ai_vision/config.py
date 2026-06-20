@@ -76,7 +76,7 @@ ROBOT_SERIAL_ENABLED = True
 
 # CH340 USB serial converter.  The by-id name remains stable even if Linux
 # assigns a different ttyUSB number after a reboot.
-ROBOT_SERIAL_PORT = "/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0"
+ROBOT_SERIAL_PORT = "/dev/ttyUSB0"
 
 ROBOT_SERIAL_BAUD = 115200
 

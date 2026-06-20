@@ -56,13 +56,29 @@ void stopMotors() {
 }
 
 
+char normalizeRobotCommand(char command) {
+  if (command >= 'a' && command <= 'z') {
+    command = command - 'a' + 'A';
+  }
+
+  switch (command) {
+    case 'W': return 'F';
+    case 'A': return 'L';
+    case 'D': return 'R';
+    case 'X': return 'B';
+    default: return command;
+  }
+}
+
+
 bool applyRobotCommand(char command) {
+  command = normalizeRobotCommand(command);
+
   switch (command) {
     case 'F': updateMotor(MOTOR_FORWARD); return true;
     case 'B': updateMotor(MOTOR_BACKWARD); return true;
     case 'L': updateMotor(MOTOR_MOVE_LEFT); return true;
     case 'R': updateMotor(MOTOR_MOVE_RIGHT); return true;
-    // removed: Q, E, Z, X special stop mappings
     case 'C': updateMotor(MOTOR_CLOCKWISE); return true;
     case 'K': updateMotor(MOTOR_COUNTERCLOCKWISE); return true;
     case 'S': stopMotors(); return true;
@@ -72,16 +88,19 @@ bool applyRobotCommand(char command) {
 
 
 void handleCommand(char command) {
+  char originalCommand = command;
+  char normalizedCommand = normalizeRobotCommand(command);
+
   if (!applyRobotCommand(command)) {
     Serial.print("ERR unknown_command ");
-    Serial.println(command);
+    Serial.println(originalCommand);
     return;
   }
 
   lastCommandMs = millis();
 
   Serial.print("OK ");
-  Serial.println(command);
+  Serial.println(normalizedCommand);
 }
 
 

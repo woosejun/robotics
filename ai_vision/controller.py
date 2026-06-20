@@ -77,6 +77,16 @@ def select_search_command(control_error_x):
 
     return "S"
 
+
+def get_remembered_search_error():
+    if state.last_direction > 0:
+        return config.SEARCH_ERROR
+
+    if state.last_direction < 0:
+        return -config.SEARCH_ERROR
+
+    return config.SEARCH_ERROR
+
 # =========================================================
 # Control Thread
 # =========================================================
@@ -301,9 +311,11 @@ def control_thread():
                     "LOST_RIGHT"
                 )
 
-                new_error = 0
+                new_error = get_remembered_search_error()
 
-                new_command = "S"
+                new_command = select_search_command(
+                    new_error
+                )
 
             # =============================================
             # LOST LEFT
@@ -318,9 +330,11 @@ def control_thread():
                     "LOST_LEFT"
                 )
 
-                new_error = 0
+                new_error = -get_remembered_search_error()
 
-                new_command = "S"
+                new_command = select_search_command(
+                    new_error
+                )
 
             # =============================================
             # WAIT UWB
