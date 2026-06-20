@@ -62,12 +62,7 @@ bool applyRobotCommand(char command) {
     case 'B': updateMotor(MOTOR_BACKWARD); return true;
     case 'L': updateMotor(MOTOR_MOVE_LEFT); return true;
     case 'R': updateMotor(MOTOR_MOVE_RIGHT); return true;
-    case 'Q':
-    case 'E':
-    case 'Z':
-    case 'X':
-      stopMotors();
-      return true;
+    // removed: Q, E, Z, X special stop mappings
     case 'C': updateMotor(MOTOR_CLOCKWISE); return true;
     case 'K': updateMotor(MOTOR_COUNTERCLOCKWISE); return true;
     case 'S': stopMotors(); return true;
