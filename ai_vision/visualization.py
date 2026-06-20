@@ -42,6 +42,18 @@ def draw_frame(frame):
             state.last_direction
         )
 
+        local_target_height = (
+            state.target_height
+        )
+
+        local_distance_zone = (
+            state.distance_zone
+        )
+
+        local_motor_command = (
+            state.motor_command
+        )
+
     # =====================================================
     # Center Line
     # =====================================================
@@ -184,6 +196,20 @@ def draw_frame(frame):
         frame,
         f"DIR: {local_direction}",
         (10, 90),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.7,
+        (0, 255, 255),
+        2
+    )
+
+    cv2.putText(
+        frame,
+        (
+            f"DIST: {local_distance_zone} "
+            f"H={local_target_height} "
+            f"CMD={local_motor_command}"
+        ),
+        (10, 120),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.7,
         (0, 255, 255),

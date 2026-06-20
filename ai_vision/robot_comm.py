@@ -1,133 +1,275 @@
+import argparse
 import os
+import select
 import termios
 import time
 
 import config
 import shared_state as state
 
-# =========================================================
-# UART Robot Command Thread
-# =========================================================
-def checksum(text):
 
-    value = 0
+BAUD_RATES = {
+    9600: termios.B9600,
+    19200: termios.B19200,
+    38400: termios.B38400,
+    57600: termios.B57600,
+    115200: termios.B115200,
+}
 
-    for char in text:
-
-        value ^= ord(char)
-
-    return value
+ROBOT_COMMANDS = frozenset("FBLRQEZXCKS")
 
 
-def make_packet(sequence, robot_state, control_error_x):
+def encode_command(command):
+    if not isinstance(command, str) or len(command) != 1:
+        raise ValueError(
+            f"지원하지 않는 로봇 명령: {command!r} (명령은 단일 문자여야 합니다)"
+        )
 
-    body = (
-        f"{sequence},"
-        f"{robot_state},"
-        f"{control_error_x}"
-    )
+    command = command.upper()
 
-    return (
-        f"${body}*"
-        f"{checksum(body):02X}\n"
-    )
+    if command not in ROBOT_COMMANDS:
+        raise ValueError(f"지원하지 않는 로봇 명령: {command}")
+
+    return command.encode("ascii")
 
 
-def open_serial_port():
+def open_serial_port(port=None, baud=None):
+    port = port or config.ROBOT_SERIAL_PORT
+    baud = baud or config.ROBOT_SERIAL_BAUD
 
-    fd = os.open(
-        config.ROBOT_SERIAL_PORT,
-        os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK
-    )
+    try:
+        baud_flag = BAUD_RATES[baud]
+    except KeyError as exc:
+        raise ValueError(f"지원하지 않는 baud rate: {baud}") from exc
 
-    attrs = termios.tcgetattr(fd)
+    fd = os.open(port, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
 
-    attrs[0] = 0
-    attrs[1] = 0
-    attrs[2] = (
-        termios.CS8 |
-        termios.CREAD |
-        termios.CLOCAL
-    )
-    attrs[3] = 0
-    attrs[4] = termios.B115200
-    attrs[5] = termios.B115200
-
-    termios.tcsetattr(
-        fd,
-        termios.TCSANOW,
-        attrs
-    )
+    try:
+        attrs = termios.tcgetattr(fd)
+        attrs[0] = 0
+        attrs[1] = 0
+        attrs[2] = termios.CS8 | termios.CREAD | termios.CLOCAL
+        attrs[3] = 0
+        attrs[4] = baud_flag
+        attrs[5] = baud_flag
+        attrs[6][termios.VMIN] = 0
+        attrs[6][termios.VTIME] = 0
+        termios.tcsetattr(fd, termios.TCSANOW, attrs)
+        termios.tcflush(fd, termios.TCIOFLUSH)
+    except Exception:
+        os.close(fd)
+        raise
 
     return fd
 
 
-def robot_comm_thread():
+def read_serial_lines(fd, buffer):
+    """Read all available bytes and return complete ASCII lines."""
+    # Bound each pass so a continuously-chatty controller cannot starve the
+    # command loop.
+    for _ in range(16):
+        try:
+            chunk = os.read(fd, 4096)
+        except BlockingIOError:
+            break
 
-    if not config.ROBOT_SERIAL_ENABLED:
+        if not chunk:
+            break
 
-        print("[INFO] Robot UART 비활성화")
+        buffer += chunk
 
-        return
+    parts = buffer.split(b"\n")
+    lines = [part.rstrip(b"\r").decode("ascii", errors="replace")
+             for part in parts[:-1]]
+    return lines, parts[-1]
+
+
+def parse_ack(line):
+    if not line.startswith("OK "):
+        return None
+
+    command = line[3:].strip()
+    return command if command in ROBOT_COMMANDS else None
+
+
+def set_connection_status(connected, command=""):
+    with state.robot_serial_lock:
+        state.robot_serial_connected = connected
+
+        if command:
+            state.robot_serial_last_ack = command
+            state.robot_serial_last_ack_time = time.monotonic()
+
+
+def verify_robot_connection(timeout=3.0, verbose=False, command="S"):
+    """Send one command and wait for the matching ESP32 ACK."""
+    fd = open_serial_port()
+    encoded_command = encode_command(command)
+    deadline = time.monotonic() + timeout
+    buffer = b""
 
     try:
+        os.write(fd, encoded_command)
 
-        serial_fd = open_serial_port()
+        while time.monotonic() < deadline:
+            wait = max(0.0, deadline - time.monotonic())
+            readable, _, _ = select.select([fd], [], [], wait)
 
-    except OSError as exc:
+            if not readable:
+                break
 
-        print(
-            "[WARNING] Robot UART 열기 실패:",
-            config.ROBOT_SERIAL_PORT,
-            exc
-        )
+            lines, buffer = read_serial_lines(fd, buffer)
 
-        return
+            for line in lines:
+                if verbose and line:
+                    print(f"[RX] {line}")
 
+                if parse_ack(line) == command:
+                    return True, command
+
+        return False, command
+    finally:
+        os.close(fd)
+
+
+def run_serial_session():
+    serial_fd = open_serial_port()
     print(
-        "[INFO] Robot UART 송신:",
+        "[INFO] Robot USB serial 송신:",
         config.ROBOT_SERIAL_PORT,
-        config.ROBOT_SERIAL_BAUD
+        config.ROBOT_SERIAL_BAUD,
     )
 
-    sequence = 0
+    receive_buffer = b""
+    last_ack_time = 0.0
+    ack_confirmed = False
+    ack_wait_warned = False
+    session_start_time = time.monotonic()
+
+    try:
+        while state.running:
+            with state.control_lock:
+                command = state.motor_command
+
+            if not isinstance(command, str) or len(command) != 1:
+                print(
+                    "[WARNING] shared_state.motor_command가 단일 문자가 아닙니다:",
+                    repr(command),
+                    "-> S로 대체합니다."
+                )
+                command = "S"
+
+            if command.upper() not in ROBOT_COMMANDS:
+                print(
+                    "[WARNING] shared_state.motor_command가 유효하지 않은 명령입니다:",
+                    repr(command),
+                    "-> S로 대체합니다."
+                )
+                command = "S"
+
+            os.write(serial_fd, encode_command(command))
+
+            lines, receive_buffer = read_serial_lines(
+                serial_fd,
+                receive_buffer,
+            )
+
+            for line in lines:
+                ack_command = parse_ack(line)
+
+                if ack_command is not None:
+                    last_ack_time = time.monotonic()
+                    set_connection_status(True, ack_command)
+
+                    if not ack_confirmed:
+                        print(
+                            "[INFO] Robot USB serial 통신 확인: ACK",
+                            ack_command,
+                        )
+                        ack_confirmed = True
+                        ack_wait_warned = False
+
+            if (
+                not ack_confirmed
+                and not ack_wait_warned
+                and time.monotonic() - session_start_time
+                > config.ROBOT_SERIAL_ACK_TIMEOUT
+            ):
+                print(
+                    "[WARNING] USB 포트는 열렸지만 Robot ACK 응답이 없음"
+                )
+                ack_wait_warned = True
+
+            if (
+                ack_confirmed
+                and time.monotonic() - last_ack_time
+                > config.ROBOT_SERIAL_ACK_TIMEOUT
+            ):
+                print("[WARNING] Robot USB serial ACK 응답 없음")
+                set_connection_status(False)
+                ack_confirmed = False
+
+            time.sleep(config.ROBOT_SERIAL_DT)
+    finally:
+        set_connection_status(False)
+        os.close(serial_fd)
+
+
+def robot_comm_thread():
+    if not config.ROBOT_SERIAL_ENABLED:
+        print("[INFO] Robot USB serial 비활성화")
+        return
 
     while state.running:
-
-        with state.control_lock:
-
-            local_state = state.robot_state
-
-            local_error = int(
-                state.control_error_x
-            )
-
-        packet = make_packet(
-            sequence,
-            local_state,
-            local_error
-        )
-
         try:
-
-            os.write(
-                serial_fd,
-                packet.encode("ascii")
-            )
-
-        except OSError as exc:
-
+            run_serial_session()
+        except (OSError, ValueError) as exc:
+            set_connection_status(False)
             print(
-                "[WARNING] Robot UART 송신 실패:",
-                exc
+                "[WARNING] Robot USB serial 연결 실패:",
+                config.ROBOT_SERIAL_PORT,
+                exc,
             )
 
-        sequence = (
-            sequence + 1
-        ) % 10000
+            if state.running:
+                time.sleep(config.ROBOT_SERIAL_RECONNECT_DT)
 
-        time.sleep(
-            config.ROBOT_SERIAL_DT
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="ESP32 USB serial 연결과 ACK를 확인합니다."
+    )
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=3.0,
+        help="ACK 대기 시간(초), 기본값: 3",
+    )
+    parser.add_argument(
+        "--command",
+        choices=sorted(ROBOT_COMMANDS),
+        default="S",
+        help="시험할 모터 명령, 기본값: S(정지)",
+    )
+    args = parser.parse_args()
+
+    try:
+        connected, command = verify_robot_connection(
+            args.timeout,
+            verbose=True,
+            command=args.command,
         )
+    except (OSError, ValueError) as exc:
+        print(f"[FAIL] USB serial 포트 열기 실패: {exc}")
+        raise SystemExit(1) from exc
 
-    os.close(serial_fd)
+    if connected:
+        print(f"[PASS] USB serial 통신 정상: ACK {command}")
+        return
+
+    print(f"[FAIL] 명령 {command} 송신 후 ACK 응답 없음")
+    raise SystemExit(2)
+
+
+if __name__ == "__main__":
+    main()

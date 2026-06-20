@@ -1,4 +1,4 @@
-from flask import Flask, Response
+from flask import Flask, Response, jsonify
 
 import threading
 import time
@@ -70,72 +70,69 @@ def generate_frames():
 def index():
 
     return '''
-    <html>
-
-    <body style="
-        text-align:center;
-        background:black;
-        color:white;
-    ">
-
-        <h1>
-            UWB Vision Follower
-        </h1>
-
-        <img
-            src="/video_feed"
-            width="960"
-        >
-
-        <div id="data"></div>
-
+    <html lang="ko">
+    <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>Vision Follower</title>
+        <style>
+            body { margin:0; padding:20px; text-align:center; background:#0b0f14;
+                   color:white; font-family:sans-serif; }
+            .camera { width:min(960px, 100%); border:2px solid #334155;
+                      border-radius:12px; }
+            .status-grid { display:grid; grid-template-columns:repeat(auto-fit,
+                           minmax(140px, 1fr)); gap:12px; max-width:960px;
+                           margin:16px auto; }
+            .card { padding:14px; background:#17202b; border-radius:10px; }
+            .label { color:#94a3b8; font-size:14px; }
+            .value { margin-top:6px; font-size:25px; font-weight:bold; }
+            #distance { color:#38bdf8; }
+            #command { color:#facc15; }
+            .save { color:#4ade80; font-size:24px; }
+        </style>
+    </head>
+    <body>
+        <h1>카메라 거리 및 주행 상태</h1>
+        <img class="camera" src="/video_feed">
+        <div class="status-grid">
+            <div class="card"><div class="label">카메라 거리</div>
+                <div class="value" id="distance">-</div></div>
+            <div class="card"><div class="label">사람 박스 높이(px)</div>
+                <div class="value" id="height">0</div></div>
+            <div class="card"><div class="label">가로 오차(px)</div>
+                <div class="value" id="error">0</div></div>
+            <div class="card"><div class="label">ESP 전송 명령</div>
+                <div class="value" id="command">S</div></div>
+            <div class="card"><div class="label">추적 상태</div>
+                <div class="value" id="state">IDLE</div></div>
+            <div class="card"><div class="label">USB 통신</div>
+                <div class="value" id="serial">연결 안 됨</div></div>
+        </div>
+        <p><a class="save" href="/save">주인 등록</a></p>
         <script>
-
-        setInterval(() => {
-
-            fetch("/get_data")
-
-            .then(r => r.text())
-
-            .then(t => {
-
-                document
-                .getElementById("data")
-                .innerHTML =
-
-                "<h2>"
-                +
-                "Control Error X: "
-                +
-                t
-                +
-                "</h2>"
-
-            })
-
-        }, 100)
-
+        const distanceNames = {
+            FAR: "멀리", TARGET: "적정 거리", NEAR: "가까이", LOST: "대상 없음"
+        };
+        async function updateStatus() {
+            try {
+                const response = await fetch("/get_data");
+                const data = await response.json();
+                document.getElementById("distance").textContent =
+                    distanceNames[data.distance_zone] || data.distance_zone;
+                document.getElementById("height").textContent = data.target_height;
+                document.getElementById("error").textContent = data.control_error_x;
+                document.getElementById("command").textContent = data.motor_command;
+                document.getElementById("state").textContent = data.robot_state;
+                document.getElementById("serial").textContent =
+                    data.serial_connected ? "정상" : "연결 안 됨";
+            } catch (error) {
+                document.getElementById("serial").textContent = "상태 조회 실패";
+            }
+        }
+        updateStatus();
+        setInterval(updateStatus, 200);
         </script>
-
-        <p>
-
-            <a
-                href="/save"
-
-                style="
-                    font-size:30px;
-                    color:lime;
-                "
-            >
-
-                주인 등록
-
-            </a>
-
-        </p>
-
     </body>
-
     </html>
     '''
 
@@ -152,16 +149,29 @@ def video_feed():
     )
 
 # =========================================================
-# Get Control Error
+# Get Camera Distance and Robot Status
 # =========================================================
 @app.route('/get_data')
 def get_data():
 
     with state.control_lock:
+        control_data = {
+            "control_error_x": state.control_error_x,
+            "distance_zone": state.distance_zone,
+            "motor_command": state.motor_command,
+            "robot_state": state.robot_state,
+            "target_height": state.target_height,
+        }
 
-        return str(
-            state.control_error_x
+    with state.robot_serial_lock:
+        control_data["serial_connected"] = (
+            state.robot_serial_connected
         )
+        control_data["serial_last_ack"] = (
+            state.robot_serial_last_ack
+        )
+
+    return jsonify(control_data)
 
 # =========================================================
 # Save Target
@@ -232,7 +242,7 @@ if __name__ == "__main__":
     ctrl_t.start()
 
     print(
-        "[INFO] Robot UDP 스레드 시작"
+        "[INFO] Robot USB serial 스레드 시작"
     )
 
     robot_t = threading.Thread(

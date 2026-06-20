@@ -1,5 +1,6 @@
 import cv2
 import time
+import os
 
 from ultralytics import YOLO
 
@@ -11,8 +12,13 @@ import shared_state as state
 # =========================================================
 print("[INFO] TensorRT 엔진 로드 중...")
 
+model_path = os.path.join(
+    os.path.dirname(__file__),
+    "yolov8n.engine"
+)
+
 model = YOLO(
-    "yolov8n.engine",
+    model_path,
     task="detect"
 )
 

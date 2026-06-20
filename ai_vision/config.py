@@ -28,15 +28,32 @@ HIST_UPDATE_THRESHOLD = 0.6
 # =========================================================
 CONTROL_DT = 0.03
 
-MAX_STEP = 15
+MAX_STEP = 35  # 이전: 15 → 더 빠른 반응
 
-ALPHA = 0.15
+ALPHA = 0.35   # 이전: 0.15 → 더 빠른 스무싱
 
 START_TURN = 40
 
 STOP_TURN = 20
 
 SEARCH_ERROR = 120
+
+# Target bounding-box height is used as a monocular distance estimate.
+# Separate enter/exit thresholds prevent commands from chattering at edges.
+DISTANCE_ALPHA = 0.20
+
+STOP_ENTER_HEIGHT = 250
+
+# Leave STOP mode only when the target height has dropped back below this value.
+STOP_EXIT_HEIGHT = 230
+
+FAR_ENTER_HEIGHT = 150
+
+FAR_EXIT_HEIGHT = 180
+
+NEAR_ENTER_HEIGHT = 430
+
+NEAR_EXIT_HEIGHT = 400
 
 # =========================================================
 # LOST FSM
@@ -53,12 +70,18 @@ LOST_LEFT_TIME = 5.0
 JPEG_QUALITY = 45
 
 # =========================================================
-# Robot UART
+# Robot USB Serial
 # =========================================================
 ROBOT_SERIAL_ENABLED = True
 
-ROBOT_SERIAL_PORT = "/dev/ttyTHS1"
+# CH340 USB serial converter.  The by-id name remains stable even if Linux
+# assigns a different ttyUSB number after a reboot.
+ROBOT_SERIAL_PORT = "/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0"
 
 ROBOT_SERIAL_BAUD = 115200
 
 ROBOT_SERIAL_DT = 0.05
+
+ROBOT_SERIAL_ACK_TIMEOUT = 1.0
+
+ROBOT_SERIAL_RECONNECT_DT = 1.0

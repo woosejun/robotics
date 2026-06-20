@@ -3,6 +3,80 @@ import time
 import config
 import shared_state as state
 
+
+MOTOR_COMMAND_TABLE = {
+    "FAR": {
+        "LEFT": "L",
+        "CENTER": "F",
+        "RIGHT": "R",
+    },
+    "TARGET": {
+        "LEFT": "L",
+        "CENTER": "F",
+        "RIGHT": "R",
+    },
+    "NEAR": {
+        "LEFT": "L",
+        "CENTER": "F",
+        "RIGHT": "R",
+    },
+    "STOP": {
+        "LEFT": "S",
+        "CENTER": "S",
+        "RIGHT": "S",
+    },
+}
+
+
+def update_distance_zone(current_zone, target_height):
+    if current_zone == "STOP":
+        if target_height <= config.STOP_EXIT_HEIGHT:
+            return "TARGET"
+
+        return "STOP"
+
+    if target_height >= config.STOP_ENTER_HEIGHT:
+        return "STOP"
+
+    if current_zone == "FAR":
+        if target_height >= config.FAR_EXIT_HEIGHT:
+            return "TARGET"
+
+        return "FAR"
+
+    if target_height < config.FAR_ENTER_HEIGHT:
+        return "FAR"
+
+    if target_height > config.NEAR_ENTER_HEIGHT:
+        return "NEAR"
+
+    return "TARGET"
+
+
+def select_motor_command(distance_zone, control_error_x):
+    # 좌우 판정 경계값 (픽셀)
+    # 이 범위 내에서는 CENTER 명령만 보냄
+    LATERAL_THRESHOLD = 100
+    
+    if control_error_x < -LATERAL_THRESHOLD:
+        horizontal_zone = "LEFT"
+    elif control_error_x > LATERAL_THRESHOLD:
+        horizontal_zone = "RIGHT"
+    else:
+        horizontal_zone = "CENTER"
+
+    return MOTOR_COMMAND_TABLE[distance_zone][horizontal_zone]
+
+
+def select_search_command(control_error_x):
+    if control_error_x > 0:
+        return "C"
+
+    if control_error_x < 0:
+        return "K"
+
+    return "S"
+
 # =========================================================
 # Control Thread
 # =========================================================
@@ -45,6 +119,32 @@ def control_thread():
             )
 
             x1, y1, x2, y2 = b
+
+            raw_target_height = min(
+                config.CAMERA_HEIGHT,
+                max(0, y2 - y1),
+            )
+
+            if not state.target_height_initialized:
+                state.virtual_target_height = raw_target_height
+                state.target_height_initialized = True
+            else:
+                state.virtual_target_height += (
+                    config.DISTANCE_ALPHA
+                    * (
+                        raw_target_height
+                        - state.virtual_target_height
+                    )
+                )
+
+            new_target_height = int(
+                state.virtual_target_height
+            )
+
+            new_distance_zone = update_distance_zone(
+                state.distance_zone,
+                new_target_height,
+            )
 
             center_x = (
                 x1 + x2
@@ -146,6 +246,22 @@ def control_thread():
 
             new_state = "TRACK"
 
+            new_command = select_motor_command(
+                new_distance_zone,
+                new_error,
+            )
+
+            if (
+                not isinstance(new_command, str)
+                or len(new_command) != 1
+            ):
+                print(
+                    "[WARNING] controller에서 잘못된 명령 생성:",
+                    repr(new_command),
+                    "-> S로 대체"
+                )
+                new_command = "S"
+
         # =====================================================
         # LOST FSM
         # =====================================================
@@ -170,6 +286,8 @@ def control_thread():
 
                 new_error = 0
 
+                new_command = "S"
+
             # =============================================
             # LOST RIGHT
             # =============================================
@@ -183,11 +301,9 @@ def control_thread():
                     "LOST_RIGHT"
                 )
 
-                new_error = (
-                    state.last_direction
-                    *
-                    config.SEARCH_ERROR
-                )
+                new_error = 0
+
+                new_command = "S"
 
             # =============================================
             # LOST LEFT
@@ -202,11 +318,9 @@ def control_thread():
                     "LOST_LEFT"
                 )
 
-                new_error = (
-                    -state.last_direction
-                    *
-                    config.SEARCH_ERROR
-                )
+                new_error = 0
+
+                new_command = "S"
 
             # =============================================
             # WAIT UWB
@@ -218,6 +332,8 @@ def control_thread():
                 )
 
                 new_error = 0
+
+                new_command = "S"
 
             # =============================================
             # Internal Sync
@@ -232,6 +348,10 @@ def control_thread():
 
             state.turning = False
 
+            state.target_height_initialized = False
+            new_target_height = 0
+            new_distance_zone = "LOST"
+
         # =====================================================
         # Final Update
         # =====================================================
@@ -243,6 +363,18 @@ def control_thread():
 
             state.robot_state = (
                 new_state
+            )
+
+            state.motor_command = (
+                new_command
+            )
+
+            state.target_height = (
+                new_target_height
+            )
+
+            state.distance_zone = (
+                new_distance_zone
             )
 
         time.sleep(
