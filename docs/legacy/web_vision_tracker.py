@@ -968,7 +968,7 @@ def index():
     ">
 
         <h1>
-            UWB Vision Follower
+            Vision Follower
         </h1>
 
         <img

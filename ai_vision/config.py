@@ -32,9 +32,9 @@ MAX_STEP = 35  # 이전: 15 → 더 빠른 반응
 
 ALPHA = 0.35   # 이전: 0.15 → 더 빠른 스무싱
 
-START_TURN = 40
+START_TURN = 120
 
-STOP_TURN = 20
+STOP_TURN = 80
 
 SEARCH_ERROR = 120
 
@@ -42,10 +42,10 @@ SEARCH_ERROR = 120
 # Separate enter/exit thresholds prevent commands from chattering at edges.
 DISTANCE_ALPHA = 0.20
 
-STOP_ENTER_HEIGHT = 340
+STOP_ENTER_HEIGHT = 430
 
 # Leave STOP mode only when the target height has dropped back below this value.
-STOP_EXIT_HEIGHT = 300
+STOP_EXIT_HEIGHT = 380
 
 FAR_ENTER_HEIGHT = 120
 

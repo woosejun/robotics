@@ -4,9 +4,9 @@ import config
 import shared_state as state
 
 SEARCH_TIME = 2.0
-LOST_TOTAL_TIME = 10.0
-LOST_ROTATE_TIME = 0.3
-LOST_STOP_TIME = 0.7
+LOST_TOTAL_TIME = 12.0
+LOST_ROTATE_TIME = 0.6
+LOST_STOP_TIME = 0.4
 
 
 MOTOR_COMMAND_TABLE = {
@@ -63,7 +63,7 @@ def select_motor_command(distance_zone, control_error_x):
     # 이 범위 내에서는 CENTER 명령만 보냄
     # 사람 추종 시 세로 방향 유지가 더 중요하므로
     # 좌우 선회 판단을 조금 더 좁게 잡습니다.
-    LATERAL_THRESHOLD = 60
+    LATERAL_THRESHOLD = 120
 
     if control_error_x < -LATERAL_THRESHOLD:
         horizontal_zone = "LEFT"
