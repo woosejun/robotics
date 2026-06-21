@@ -42,14 +42,14 @@ SEARCH_ERROR = 120
 # Separate enter/exit thresholds prevent commands from chattering at edges.
 DISTANCE_ALPHA = 0.20
 
-STOP_ENTER_HEIGHT = 250
+STOP_ENTER_HEIGHT = 340
 
 # Leave STOP mode only when the target height has dropped back below this value.
-STOP_EXIT_HEIGHT = 230
+STOP_EXIT_HEIGHT = 300
 
-FAR_ENTER_HEIGHT = 150
+FAR_ENTER_HEIGHT = 120
 
-FAR_EXIT_HEIGHT = 180
+FAR_EXIT_HEIGHT = 150
 
 NEAR_ENTER_HEIGHT = 430
 
@@ -60,9 +60,9 @@ NEAR_EXIT_HEIGHT = 400
 # =========================================================
 SEARCH_TIME = 1.0
 
-LOST_RIGHT_TIME = 3.0
+LOST_RIGHT_TIME = 7.0
 
-LOST_LEFT_TIME = 5.0
+LOST_LEFT_TIME = 7.0
 
 # =========================================================
 # Stream

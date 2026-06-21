@@ -3,6 +3,11 @@ import time
 import config
 import shared_state as state
 
+SEARCH_TIME = 2.0
+LOST_TOTAL_TIME = 10.0
+LOST_ROTATE_TIME = 0.3
+LOST_STOP_TIME = 0.7
+
 
 MOTOR_COMMAND_TABLE = {
     "FAR": {
@@ -56,8 +61,10 @@ def update_distance_zone(current_zone, target_height):
 def select_motor_command(distance_zone, control_error_x):
     # 좌우 판정 경계값 (픽셀)
     # 이 범위 내에서는 CENTER 명령만 보냄
-    LATERAL_THRESHOLD = 100
-    
+    # 사람 추종 시 세로 방향 유지가 더 중요하므로
+    # 좌우 선회 판단을 조금 더 좁게 잡습니다.
+    LATERAL_THRESHOLD = 60
+
     if control_error_x < -LATERAL_THRESHOLD:
         horizontal_zone = "LEFT"
     elif control_error_x > LATERAL_THRESHOLD:
@@ -107,10 +114,17 @@ def control_thread():
                 list(state.detections)
             )
 
+        with state.target_hist_lock:
+            local_target_hist = (
+                state.target_hist
+            )
+
         # =====================================================
         # TRACK
         # =====================================================
         if (
+            local_target_hist is not None
+            and
             local_target_idx != -1
             and
             local_target_idx <
@@ -289,7 +303,7 @@ def control_thread():
             if (
                 lost_duration
                 <
-                config.SEARCH_TIME
+                SEARCH_TIME
             ):
 
                 new_state = "SEARCH"
@@ -304,18 +318,28 @@ def control_thread():
             elif (
                 lost_duration
                 <
-                config.LOST_RIGHT_TIME
+                SEARCH_TIME +
+                LOST_TOTAL_TIME / 2.0
             ):
+
+                phase = (
+                    lost_duration -
+                    SEARCH_TIME
+                ) % (
+                    LOST_ROTATE_TIME +
+                    LOST_STOP_TIME
+                )
 
                 new_state = (
                     "LOST_RIGHT"
                 )
 
-                new_error = get_remembered_search_error()
+                new_error = 0
 
-                new_command = select_search_command(
-                    new_error
-                )
+                if phase < LOST_ROTATE_TIME:
+                    new_command = "C"
+                else:
+                    new_command = "S"
 
             # =============================================
             # LOST LEFT
@@ -323,23 +347,38 @@ def control_thread():
             elif (
                 lost_duration
                 <
-                config.LOST_LEFT_TIME
+                SEARCH_TIME +
+                LOST_TOTAL_TIME
             ):
+
+                phase = (
+                    lost_duration -
+                    SEARCH_TIME
+                ) % (
+                    LOST_ROTATE_TIME +
+                    LOST_STOP_TIME
+                )
 
                 new_state = (
                     "LOST_LEFT"
                 )
 
-                new_error = -get_remembered_search_error()
+                new_error = 0
 
-                new_command = select_search_command(
-                    new_error
-                )
+                if phase < LOST_ROTATE_TIME:
+                    new_command = "K"
+                else:
+                    new_command = "S"
 
             # =============================================
             # WAIT UWB
             # =============================================
-            else:
+            elif (
+                lost_duration
+                >
+                SEARCH_TIME +
+                LOST_TOTAL_TIME
+            ):
 
                 new_state = (
                     "WAIT_UWB"

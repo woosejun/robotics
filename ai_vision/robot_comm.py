@@ -16,7 +16,7 @@ BAUD_RATES = {
     115200: termios.B115200,
 }
 
-ROBOT_COMMANDS = frozenset("FBLRCKS")
+ROBOT_COMMANDS = frozenset("FBLRCKS12345678!@#$")
 
 COMMAND_ALIASES = {
     "W": "F",  # keyboard forward
