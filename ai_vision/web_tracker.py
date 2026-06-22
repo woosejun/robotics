@@ -11,6 +11,7 @@ from camera import camera_thread
 from inference import inference_thread
 from controller import control_thread
 from robot_comm import robot_comm_thread
+from uwb_comm import uwb_comm_thread
 from visualization import draw_frame
 
 # =========================================================
@@ -107,6 +108,10 @@ def index():
                 <div class="value" id="state">IDLE</div></div>
             <div class="card"><div class="label">USB 통신</div>
                 <div class="value" id="serial">연결 안 됨</div></div>
+            <div class="card"><div class="label">UWB 앵커</div>
+                <div class="value" id="uwb">연결 안 됨</div></div>
+            <div class="card"><div class="label">UWB 태그 위치 (좌/전방)</div>
+                <div class="value" id="uwb-position">-</div></div>
         </div>
         <p><a class="save" href="/save">주인 등록</a></p>
         <script>
@@ -125,6 +130,9 @@ def index():
                 document.getElementById("state").textContent = data.robot_state;
                 document.getElementById("serial").textContent =
                     data.serial_connected ? "정상" : "연결 안 됨";
+                document.getElementById("uwb").textContent = data.uwb_status;
+                document.getElementById("uwb-position").textContent =
+                    data.uwb_position_m === null ? "-" : data.uwb_position_m;
             } catch (error) {
                 document.getElementById("serial").textContent = "상태 조회 실패";
             }
@@ -170,6 +178,26 @@ def get_data():
         control_data["serial_last_ack"] = (
             state.robot_serial_last_ack
         )
+
+    with state.uwb_lock:
+        left = state.uwb_left_connected
+        right = state.uwb_right_connected
+        if left and right:
+            control_data["uwb_status"] = "좌/우 연결"
+        elif left:
+            control_data["uwb_status"] = "왼쪽만 연결"
+        elif right:
+            control_data["uwb_status"] = "오른쪽만 연결"
+        else:
+            control_data["uwb_status"] = "연결 안 됨"
+        if state.uwb_position_x_m is None or state.uwb_position_y_m is None:
+            control_data["uwb_position_m"] = None
+        else:
+            control_data["uwb_position_m"] = (
+                f"{state.uwb_position_x_m:+.2f} / {state.uwb_position_y_m:.2f} m"
+            )
+        control_data["uwb_left_distance_m"] = state.uwb_left_distance_m
+        control_data["uwb_right_distance_m"] = state.uwb_right_distance_m
 
     return jsonify(control_data)
 
@@ -252,6 +280,18 @@ if __name__ == "__main__":
     robot_t.daemon = True
 
     robot_t.start()
+
+    print(
+        "[INFO] UWB 앵커 수신 스레드 시작"
+    )
+
+    uwb_t = threading.Thread(
+        target=uwb_comm_thread
+    )
+
+    uwb_t.daemon = True
+
+    uwb_t.start()
 
     print(
         "[INFO] Flask 서버 시작"

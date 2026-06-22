@@ -57,6 +57,27 @@ robot_serial_last_ack_time = 0.0
 robot_serial_lock = threading.Lock()
 
 # =========================================================
+# UWB Status (two anchors on robot, tag carried by person)
+# =========================================================
+uwb_left_connected = False
+
+uwb_right_connected = False
+
+uwb_left_distance_m = None
+
+uwb_right_distance_m = None
+
+uwb_position_x_m = None
+
+uwb_position_y_m = None
+
+uwb_last_update_time = 0.0
+
+uwb_last_message = ""
+
+uwb_lock = threading.Lock()
+
+# =========================================================
 # Internal State
 # =========================================================
 virtual_error_x = 0

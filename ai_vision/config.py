@@ -85,3 +85,27 @@ ROBOT_SERIAL_DT = 0.05
 ROBOT_SERIAL_ACK_TIMEOUT = 1.0
 
 ROBOT_SERIAL_RECONNECT_DT = 1.0
+
+# =========================================================
+# UWB (로봇 앵커 2개 / 사람 태그 1개)
+# =========================================================
+# 앵커는 전용 USB CDC 포트를 사용합니다. ESP32 모터 제어 포트인
+# ROBOT_SERIAL_PORT와 UWB 포트를 같은 값으로 설정하면 안 됩니다.
+UWB_ENABLED = True
+
+# 오른쪽 앵커: 부팅 로그에서 DEVICE ID: deca0302 확인됨.
+UWB_RIGHT_PORT = "/dev/ttyACM0"
+
+# 왼쪽 앵커를 연결한 뒤 실제 포트로 바꿉니다(보통 /dev/ttyACM1).
+UWB_LEFT_PORT = "/dev/ttyACM1"
+
+UWB_BAUD = 115200
+UWB_RECONNECT_DT = 1.0
+
+# 로봇에 붙인 왼쪽·오른쪽 앵커의 UWB 안테나 중심 사이 실제 거리(m)입니다.
+# 예: 두 앵커의 모듈 중앙이 30cm 떨어졌다면 0.30으로 설정합니다.
+# 이 값이 있어야 젯슨이 두 거리로 사람의 좌우/전방 위치를 계산할 수 있습니다.
+UWB_ANCHOR_BASELINE_M = 0.30
+
+# 이 시간보다 오래된 거리 데이터는 사용할 수 없는 값으로 처리합니다.
+UWB_STALE_TIMEOUT = 1.5
