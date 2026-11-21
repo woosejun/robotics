@@ -1,323 +1,132 @@
-import cv2
-import time
-import os
+"""Run person detection and match a registered clothing histogram."""
 
-from ultralytics import YOLO
+import os
+import time
+
+import cv2
 
 import config
 import shared_state as state
 
-# =========================================================
-# TensorRT
-# =========================================================
-print("[INFO] TensorRT 엔진 로드 중...")
 
-model_path = os.path.join(
-    os.path.dirname(__file__),
-    "models",
-    "yolov8n.engine"
-)
-
-model = YOLO(
-    model_path,
-    task="detect"
-)
-
-print("[SUCCESS] TensorRT 엔진 로드 완료")
-
-# =========================================================
-# Histogram
-# =========================================================
 def get_hist(frame, box):
-
-    x1, y1, x2, y2 = map(
-        int,
-        box
-    )
-
-    h, w, _ = frame.shape
-
-    x1 = max(0, x1)
-    y1 = max(0, y1)
-
-    x2 = min(w, x2)
-    y2 = min(h, y2)
-
-    roi = frame[
-        y1 + (y2 - y1)//4 : y2,
-        x1 + (x2 - x1)//4 :
-        x2 - (x2 - x1)//4
-    ]
-
+    x1, y1, x2, y2 = box
+    roi = frame[y1 + (y2 - y1) // 4:y2, x1 + (x2 - x1) // 4:x2 - (x2 - x1) // 4]
     if roi.size == 0:
-
         return None
 
-    roi = cv2.resize(
-        roi,
-        (64, 128)
-    )
+    hsv = cv2.cvtColor(cv2.resize(roi, (64, 128)), cv2.COLOR_BGR2HSV)
+    hist = cv2.calcHist([hsv], [0, 1], None, [16, 16], [0, 180, 0, 256])
+    return cv2.normalize(hist, hist, 0, 1, cv2.NORM_MINMAX)
 
-    hsv = cv2.cvtColor(
-        roi,
-        cv2.COLOR_BGR2HSV
-    )
 
-    hist = cv2.calcHist(
-        [hsv],
-        [0, 1],
-        None,
-        [16, 16],
-        [0, 180, 0, 256]
-    )
+def detection_boxes(model, frame):
+    result = model(
+        frame, classes=0, conf=config.CONFIDENCE_THRESHOLD, verbose=False,
+        imgsz=config.YOLO_IMGSZ,
+    )[0]
+    height, width = frame.shape[:2]
+    boxes = []
+    for x1, y1, x2, y2 in result.boxes.xyxy.cpu().tolist():
+        x1, x2 = max(0, int(x1)), min(width, int(x2))
+        y1, y2 = max(0, int(y1)), min(height, int(y2))
+        if x1 < x2 and y1 < y2:
+            boxes.append((x1, y1, x2, y2))
+    return boxes
 
-    cv2.normalize(
-        hist,
-        hist,
-        0,
-        1,
-        cv2.NORM_MINMAX
-    )
 
-    return hist
+def match_target(target_hist, histograms):
+    scores = [
+        float(cv2.compareHist(target_hist, hist, cv2.HISTCMP_CORREL))
+        if target_hist is not None and hist is not None else 0.0
+        for hist in histograms
+    ]
+    ranked = sorted(range(len(scores)), key=scores.__getitem__, reverse=True)
+    if not ranked or scores[ranked[0]] <= config.SIM_THRESHOLD:
+        return -1, scores
+    if len(ranked) > 1 and scores[ranked[0]] - scores[ranked[1]] < config.SIM_MIN_MARGIN:
+        return -1, scores
+    return ranked[0], scores
 
-# =========================================================
-# Inference Thread
-# =========================================================
+
 def inference_thread():
+    model_path = config.YOLO_MODEL_PATH or os.path.join(
+        os.path.dirname(__file__), "models", "yolov8n.engine"
+    )
+    if not os.path.isfile(model_path):
+        print(f"[ERROR] YOLO model missing: {model_path}")
+        return
+    try:
+        from ultralytics import YOLO
 
+        model = YOLO(model_path, task="detect")
+    except Exception as exc:
+        print(f"[ERROR] YOLO model could not be initialized: {exc}")
+        return
+
+    target_hist = None
+    processed_at = float("-inf")
     while state.running:
+        now = time.monotonic()
+        with state.data_lock:
+            request_at = state.registration_requested_at
+            if request_at is not None and now - request_at >= config.REGISTRATION_TIMEOUT:
+                state.registration_requested_at = None
+                state.registration_status = "TIMED_OUT"
+                request_at = None
+            if state.registration_status != "REGISTERED":
+                target_hist = None
 
         with state.frame_lock:
-
-            if state.current_frame is None:
-
-                frame_copy = None
-
-            else:
-
-                frame_copy = (
-                    state.current_frame.copy()
-                )
-
-        if frame_copy is None:
-
+            frame, frame_at = state.current_frame, state.frame_at
+        if frame is None or frame_at <= processed_at or now - frame_at >= config.VISION_STALE_TIMEOUT:
             time.sleep(0.01)
-
             continue
 
+        processed_at = frame_at
         try:
-
-            results = model(
-                frame_copy,
-                classes=0,
-                conf=config.CONFIDENCE_THRESHOLD,
-                verbose=False,
-                imgsz=config.YOLO_IMGSZ
-            )
-
-            local_boxes = (
-                results[0].boxes
-            )
-
-            local_scores = []
-
-            local_target_idx = -1
-
-            best_sim = -1
-
-            with state.target_hist_lock:
-
-                current_target_hist = (
-                    state.target_hist
+            boxes = detection_boxes(model, frame)
+            histograms = [get_hist(frame, box) for box in boxes]
+            target_index, scores = match_target(target_hist, histograms)
+            if target_index >= 0 and scores[target_index] > config.HIST_UPDATE_THRESHOLD:
+                target_hist = cv2.addWeighted(
+                    target_hist, 0.9, histograms[target_index], 0.1, 0
                 )
-
-            # =================================================
-            # Person Compare
-            # =================================================
-            for i, box in enumerate(
-                local_boxes
-            ):
-
-                b = (
-                    box.xyxy[0]
-                    .cpu()
-                    .numpy()
-                )
-
-                curr_hist = get_hist(
-                    frame_copy,
-                    b
-                )
-
-                if (
-                    current_target_hist
-                    is not None
-                    and
-                    curr_hist
-                    is not None
-                ):
-
-                    sim = cv2.compareHist(
-                        current_target_hist,
-                        curr_hist,
-                        cv2.HISTCMP_CORREL
-                    )
-
-                else:
-
-                    sim = 0.0
-
-                local_scores.append(sim)
-
-                if (
-                    sim >
-                    config.SIM_THRESHOLD
-                    and
-                    sim > best_sim
-                ):
-
-                    best_sim = sim
-
-                    local_target_idx = i
-
-            # =================================================
-            # Histogram Update
-            # =================================================
-            if (
-                local_target_idx != -1
-                and
-                current_target_hist
-                is not None
-            ):
-
-                best_box = (
-                    local_boxes[
-                        local_target_idx
-                    ]
-                    .xyxy[0]
-                    .cpu()
-                    .numpy()
-                )
-
-                new_hist = get_hist(
-                    frame_copy,
-                    best_box
-                )
-
-                if (
-                    new_hist is not None
-                    and
-                    local_scores[
-                        local_target_idx
-                    ]
-                    >
-                    config.HIST_UPDATE_THRESHOLD
-                ):
-
-                    updated_hist = (
-                        cv2.addWeighted(
-                            current_target_hist,
-                            0.9,
-                            new_hist,
-                            0.1,
-                            0
-                        )
-                    )
-
-                    with state.target_hist_lock:
-
-                        state.target_hist = (
-                            updated_hist
-                        )
-
-            # =================================================
-            # SAVE
-            # =================================================
-            with state.save_lock:
-
-                do_save = (
-                    state.save_requested
-                )
-
-                if do_save:
-
-                    state.save_requested = False
-
-            if (
-                do_save
-                and
-                len(local_boxes) > 0
-            ):
-
-                boxes_np = (
-                    local_boxes
-                    .xyxy
-                    .cpu()
-                    .numpy()
-                )
-
-                centers = [
-
-                    (b[0] + b[2]) / 2
-
-                    for b in boxes_np
-                ]
-
-                dist = [
-
-                    abs(
-                        c -
-                        config.CENTER_X
-                    )
-
-                    for c in centers
-                ]
-
-                best_idx = dist.index(
-                    min(dist)
-                )
-
-                new_hist = get_hist(
-                    frame_copy,
-                    boxes_np[best_idx]
-                )
-
-                if new_hist is not None:
-
-                    with state.target_hist_lock:
-
-                        state.target_hist = (
-                            new_hist
-                        )
-
-                    print(
-                        "[INFO] "
-                        "타겟 등록 완료"
-                    )
-
-            # =================================================
-            # Update Detection
-            # =================================================
+        except Exception as exc:
             with state.data_lock:
+                state.detections = []
+                state.sim_scores = []
+                state.target_idx = -1
+                state.detection_at = float("-inf")
+            print(f"[ERROR] YOLO inference: {exc}")
+            time.sleep(0.1)
+            continue
 
-                state.detections = (
-                    list(local_boxes)
-                )
+        with state.data_lock:
+            # A new registration requested during this inference needs a newer frame.
+            if request_at != state.registration_requested_at:
+                continue
+            now = time.monotonic()
+            if now - frame_at >= config.VISION_STALE_TIMEOUT:
+                continue
 
-                state.sim_scores = (
-                    list(local_scores)
-                )
-
-                state.target_idx = (
-                    local_target_idx
-                )
-
-        except Exception as e:
-
-            print(
-                "[TensorRT ERROR]",
-                e
-            )
-
-        time.sleep(0.02)
+            if request_at is not None and frame_at >= request_at:
+                if now - request_at >= config.REGISTRATION_TIMEOUT:
+                    state.registration_requested_at = None
+                    state.registration_status = "TIMED_OUT"
+                else:
+                    candidates = [i for i, hist in enumerate(histograms) if hist is not None]
+                    if candidates:
+                        target_index = min(
+                            candidates,
+                            key=lambda i: abs((boxes[i][0] + boxes[i][2]) / 2 - config.CENTER_X),
+                        )
+                        target_hist = histograms[target_index]
+                        scores[target_index] = 1.0
+                        state.registration_requested_at = None
+                        state.registration_status = "REGISTERED"
+            state.detections = boxes
+            state.sim_scores = scores
+            state.target_idx = target_index
+            # Keep the camera timestamp so a frozen frame cannot refresh the command.
+            state.detection_at = frame_at

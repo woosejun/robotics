@@ -1,103 +1,48 @@
-import threading
-import time
+"""State shared by the camera, inference, control, serial and web threads."""
 
-# =========================================================
-# Frame
-# =========================================================
-current_frame = None
+import threading
 
 frame_lock = threading.Lock()
-
-# =========================================================
-# Detection
-# =========================================================
-detections = []
-
-sim_scores = []
-
-target_idx = -1
+current_frame = None
+frame_at = float("-inf")
 
 data_lock = threading.Lock()
+detections = []
+sim_scores = []
+target_idx = -1
+detection_at = float("-inf")
+registration_requested_at = None
+registration_status = "UNREGISTERED"
 
-# =========================================================
-# Target Histogram
-# =========================================================
-target_hist = None
-
-target_hist_lock = threading.Lock()
-
-# =========================================================
-# Control State
-# =========================================================
+# When both locks are needed, acquire data_lock before control_lock.
+control_lock = threading.Lock()
+motion_enabled = False
+motion_epoch = 0
 control_error_x = 0
-
 robot_state = "IDLE"
-
 motor_command = "S"
-
+motor_command_at = float("-inf")
+motion_input_until = float("-inf")
+motion_input_fault = "VISION_STALE"
+motor_pulse_until = float("inf")
+uwb_armed_generation = None
+uwb_intent = "S"
 target_height = 0
-
 distance_zone = "LOST"
-
 last_direction = 0
 
-turning = False
-
-control_lock = threading.Lock()
-
-# =========================================================
-# Robot Serial Status
-# =========================================================
-robot_serial_connected = False
-
-robot_serial_last_ack = ""
-
-robot_serial_last_ack_time = 0.0
-
 robot_serial_lock = threading.Lock()
+robot_serial_connected = False
+robot_serial_last_ack = ""
+robot_serial_last_ack_time = float("-inf")
 
-# =========================================================
-# UWB Status (two anchors on robot, tag carried by person)
-# =========================================================
-uwb_left_connected = False
-
-uwb_right_connected = False
-
-uwb_left_distance_m = None
-
-uwb_right_distance_m = None
-
-uwb_position_x_m = None
-
-uwb_position_y_m = None
-
-uwb_last_update_time = 0.0
-
-uwb_last_message = ""
-
-uwb_lock = threading.Lock()
-
-# =========================================================
-# Internal State
-# =========================================================
-virtual_error_x = 0
-
-prev_control_error = 0
-
-virtual_target_height = 0.0
-
-target_height_initialized = False
-
-lost_start_time = time.time()
-
-# =========================================================
-# Save Request
-# =========================================================
-save_requested = False
-
-save_lock = threading.Lock()
-
-# =========================================================
-# Running
-# =========================================================
 running = True
+
+
+def visual_target_is_current(now, timeout):
+    """Caller holds data_lock."""
+    return (
+        registration_status == "REGISTERED"
+        and 0 <= target_idx < len(detections)
+        and now - detection_at < timeout
+    )

@@ -1,435 +1,186 @@
+"""Vision tracking, motion authorization and fail-safe command generation."""
+
 import time
 
 import config
 import shared_state as state
-
-SEARCH_TIME = 2.0
-LOST_TOTAL_TIME = 12.0
-LOST_ROTATE_TIME = 0.6
-LOST_STOP_TIME = 0.4
+from uwb_drive import UwbFollower, read_uwb_input
 
 
-MOTOR_COMMAND_TABLE = {
-    "FAR": {
-        "LEFT": "L",
-        "CENTER": "F",
-        "RIGHT": "R",
-    },
-    "TARGET": {
-        "LEFT": "L",
-        "CENTER": "F",
-        "RIGHT": "R",
-    },
-    "NEAR": {
-        "LEFT": "L",
-        "CENTER": "F",
-        "RIGHT": "R",
-    },
-    "STOP": {
-        "LEFT": "S",
-        "CENTER": "S",
-        "RIGHT": "S",
-    },
-}
-
-
-def update_distance_zone(current_zone, target_height):
-    if current_zone == "STOP":
-        if target_height <= config.STOP_EXIT_HEIGHT:
-            return "TARGET"
-
+def update_distance_zone(current_zone, height, raw_height):
+    # Stop immediately on a large raw box. Use the smoothed height for release.
+    if raw_height >= config.STOP_ENTER_HEIGHT or height >= config.STOP_ENTER_HEIGHT:
         return "STOP"
-
-    if target_height >= config.STOP_ENTER_HEIGHT:
+    if current_zone == "STOP" and max(height, raw_height) > config.STOP_EXIT_HEIGHT:
         return "STOP"
-
-    if current_zone == "FAR":
-        if target_height >= config.FAR_EXIT_HEIGHT:
-            return "TARGET"
-
-        return "FAR"
-
-    if target_height < config.FAR_ENTER_HEIGHT:
-        return "FAR"
-
-    if target_height > config.NEAR_ENTER_HEIGHT:
-        return "NEAR"
-
-    return "TARGET"
+    far_threshold = (
+        config.FAR_EXIT_HEIGHT if current_zone == "FAR" else config.FAR_ENTER_HEIGHT
+    )
+    return "FAR" if height < far_threshold else "TARGET"
 
 
-def select_motor_command(distance_zone, control_error_x):
-    # 좌우 판정 경계값 (픽셀)
-    # 이 범위 내에서는 CENTER 명령만 보냄
-    # 사람 추종 시 세로 방향 유지가 더 중요하므로
-    # 좌우 선회 판단을 조금 더 좁게 잡습니다.
-    LATERAL_THRESHOLD = 120
+def set_motion_enabled(enabled, ranges=None):
+    """Authorize the selected source with fresh input and a confirmed motor link."""
+    with state.data_lock, state.control_lock:
+        now = time.monotonic()
+        deadline = state.detection_at + config.VISION_STALE_TIMEOUT
+        generation = None
+        expiry_status = "VISION_STALE"
+        if enabled:
+            if config.FOLLOW_MODE == "uwb":
+                if not config.UWB_ENABLED or ranges is None:
+                    return "UWB 수신기가 필요합니다."
+                _, generation, _, fault, deadline = read_uwb_input(ranges, now)
+                if fault == "UWB_FRONT_LOST":
+                    return "카메라에서 등록한 대상의 정면 위치를 확인해야 합니다."
+                if fault == "UWB_OUTSIDE":
+                    return "태그를 카트 정면의 동작 범위 안에 놓아 주세요."
+                if fault:
+                    return "좌우 앵커에서 유효한 태그 거리를 기다려 주세요."
+                expiry_status = "UWB_INPUT_STALE"
+            elif not state.visual_target_is_current(now, config.VISION_STALE_TIMEOUT):
+                return "등록한 대상이 실시간 영상에서 확인되어야 합니다."
+            if config.ROBOT_SERIAL_ENABLED:
+                with state.robot_serial_lock:
+                    if not state.robot_serial_connected:
+                        return "모터 제어기의 연결 확인을 기다려 주세요."
+        if state.motion_enabled != enabled:
+            state.motion_enabled = enabled
+            state.motion_epoch += 1
+            state.motor_command = "S"
+            state.motor_command_at = now
+            state.motion_input_until = deadline
+            state.motion_input_fault = expiry_status
+            state.motor_pulse_until = float("inf")
+            state.uwb_armed_generation = generation
+        return None
 
-    if control_error_x < -LATERAL_THRESHOLD:
-        horizontal_zone = "LEFT"
-    elif control_error_x > LATERAL_THRESHOLD:
-        horizontal_zone = "RIGHT"
-    else:
-        horizontal_zone = "CENTER"
 
-    return MOTOR_COMMAND_TABLE[distance_zone][horizontal_zone]
-
-
-def select_search_command(control_error_x):
-    if control_error_x > 0:
-        return "C"
-
-    if control_error_x < 0:
-        return "K"
-
-    return "S"
+def request_registration():
+    with state.data_lock, state.control_lock:
+        state.registration_requested_at = time.monotonic()
+        state.registration_status = "PENDING"
+        state.target_idx = -1
+        state.motion_enabled = False
+        state.motor_command = "S"
 
 
-def get_remembered_search_error():
-    if state.last_direction > 0:
-        return config.SEARCH_ERROR
+def expire_registration(now):
+    with state.data_lock:
+        requested_at = state.registration_requested_at
+        if requested_at is not None and now - requested_at >= config.REGISTRATION_TIMEOUT:
+            state.registration_requested_at = None
+            state.registration_status = "TIMED_OUT"
 
-    if state.last_direction < 0:
-        return -config.SEARCH_ERROR
 
-    return config.SEARCH_ERROR
+class Follower:
+    def __init__(self):
+        self.reset()
 
-# =========================================================
-# Control Thread
-# =========================================================
-def control_thread():
+    def reset(self):
+        self.filtered_error = 0.0
+        self.filtered_height = None
+        self.previous_error = 0
+        self.turning = False
+        self.zone = "LOST"
+        self.lost_at = None
+        self.last_frame_at = float("-inf")
+        self.last_direction = 0
+        self.tracking_result = (0, 0, "LOST", "S")
 
-    while state.running:
-
-        # =====================================================
-        # Detection Copy
-        # =====================================================
-        with state.data_lock:
-
-            local_target_idx = (
-                state.target_idx
-            )
-
-            local_detections = (
-                list(state.detections)
-            )
-
-        with state.target_hist_lock:
-            local_target_hist = (
-                state.target_hist
-            )
-
-        # =====================================================
-        # TRACK
-        # =====================================================
-        if (
-            local_target_hist is not None
-            and
-            local_target_idx != -1
-            and
-            local_target_idx <
-            len(local_detections)
-        ):
-
-            box = local_detections[
-                local_target_idx
-            ]
-
-            b = (
-                box.xyxy[0]
-                .cpu()
-                .numpy()
-                .astype(int)
-            )
-
-            x1, y1, x2, y2 = b
-
-            raw_target_height = min(
-                config.CAMERA_HEIGHT,
-                max(0, y2 - y1),
-            )
-
-            if not state.target_height_initialized:
-                state.virtual_target_height = raw_target_height
-                state.target_height_initialized = True
-            else:
-                state.virtual_target_height += (
-                    config.DISTANCE_ALPHA
-                    * (
-                        raw_target_height
-                        - state.virtual_target_height
-                    )
-                )
-
-            new_target_height = int(
-                state.virtual_target_height
-            )
-
-            new_distance_zone = update_distance_zone(
-                state.distance_zone,
-                new_target_height,
-            )
-
-            center_x = (
-                x1 + x2
-            ) // 2
-
-            # =============================================
-            # Raw Error
-            # =============================================
-            raw_error_x = (
-                center_x -
-                config.CENTER_X
-            )
-
-            # =============================================
-            # Virtual Target
-            # =============================================
-            state.virtual_error_x += (
-
-                config.ALPHA * (
-
-                    raw_error_x -
-                    state.virtual_error_x
-                )
-            )
-
-            target_error = int(
-                state.virtual_error_x
-            )
-
-            # =============================================
-            # Rate Limiter
-            # =============================================
-            delta = (
-                target_error -
-                state.prev_control_error
-            )
-
-            delta = max(
-                -config.MAX_STEP,
-                min(
-                    config.MAX_STEP,
-                    delta
-                )
-            )
-
-            new_error = (
-                state.prev_control_error
-                + delta
-            )
-
-            state.prev_control_error = (
-                new_error
-            )
-
-            # =============================================
-            # Hysteresis Turning Logic
-            # =============================================
-            if state.turning == False:
-
-                if (
-                    abs(new_error)
-                    >
-                    config.START_TURN
-                ):
-
-                    state.turning = True
-
-            else:
-
-                if (
-                    abs(new_error)
-                    <
-                    config.STOP_TURN
-                ):
-
-                    state.turning = False
-
-            if state.turning == False:
-
-                new_error = 0
-
-            # =============================================
-            # Direction Memory
-            # =============================================
-            if new_error > 0:
-
-                state.last_direction = 1
-
-            elif new_error < 0:
-
-                state.last_direction = -1
-
-            # =============================================
-            # State Update
-            # =============================================
-            state.lost_start_time = (
-                time.time()
-            )
-
-            new_state = "TRACK"
-
-            new_command = select_motor_command(
-                new_distance_zone,
-                new_error,
-            )
-
-            if (
-                not isinstance(new_command, str)
-                or len(new_command) != 1
-            ):
-                print(
-                    "[WARNING] controller에서 잘못된 명령 생성:",
-                    repr(new_command),
-                    "-> S로 대체"
-                )
-                new_command = "S"
-
-        # =====================================================
-        # LOST FSM
-        # =====================================================
+    def track(self, box):
+        x1, y1, x2, y2 = box
+        raw_height = min(config.CAMERA_HEIGHT, max(0, y2 - y1))
+        if self.filtered_height is None:
+            self.filtered_height = raw_height
         else:
+            self.filtered_height += config.DISTANCE_ALPHA * (raw_height - self.filtered_height)
+        self.zone = update_distance_zone(self.zone, self.filtered_height, raw_height)
 
-            lost_duration = (
-                time.time()
-                -
-                state.lost_start_time
-            )
+        raw_error = (x1 + x2) // 2 - config.CENTER_X
+        self.filtered_error += config.ALPHA * (raw_error - self.filtered_error)
+        delta = int(self.filtered_error) - self.previous_error
+        self.previous_error += max(-config.MAX_STEP, min(config.MAX_STEP, delta))
+        turn_threshold = config.STOP_TURN if self.turning else config.START_TURN
+        self.turning = abs(self.previous_error) >= turn_threshold
+        error = self.previous_error if self.turning else 0
+        if error:
+            self.last_direction = 1 if error > 0 else -1
 
-            # =============================================
-            # SEARCH
-            # =============================================
-            if (
-                lost_duration
-                <
-                SEARCH_TIME
-            ):
+        if self.zone == "STOP":
+            command = "S"
+        elif self.turning:
+            command = "R" if error > 0 else "L"
+        else:
+            command = "F"
+        return error, int(self.filtered_height), self.zone, command
 
-                new_state = "SEARCH"
+    def update(self, now):
+        expire_registration(now)
+        with state.data_lock, state.control_lock:
+            frame_at = state.detection_at
+            fresh = now - frame_at < config.VISION_STALE_TIMEOUT
+            registered = state.registration_status == "REGISTERED"
+            detection_present = registered and 0 <= state.target_idx < len(state.detections)
+            status, error, height, zone, command = "IDLE", 0, 0, "LOST", "S"
 
-                new_error = 0
+            # Keep the tracker display alive with motion disabled.
+            if detection_present and fresh:
+                if frame_at != self.last_frame_at:
+                    self.tracking_result = self.track(state.detections[state.target_idx])
+                error, height, zone, tracking_command = self.tracking_result
+                self.lost_at = None
+                status = "TRACK" if state.motion_enabled else "READY"
+                if state.motion_enabled:
+                    command = tracking_command
+            elif not fresh:
+                if state.motion_enabled:
+                    status = "VISION_STALE"
+                elif state.robot_state == "VISION_STALE":
+                    status = state.robot_state
+                state.motion_enabled = False
+                self.reset()
+            elif state.motion_enabled:
+                if self.lost_at is None:
+                    self.reset()
+                    self.lost_at = now
+                elapsed = now - self.lost_at
+                status = "SEARCH"
+                search_end = config.SEARCH_TIME
+                if config.SEARCH_ROTATION_ENABLED:
+                    search_end += 2 * config.LOST_SWEEP_TIME
+                    if config.SEARCH_TIME <= elapsed < search_end:
+                        sweep = elapsed - config.SEARCH_TIME
+                        clockwise = sweep < config.LOST_SWEEP_TIME
+                        status = "LOST_RIGHT" if clockwise else "LOST_LEFT"
+                        if sweep % (config.LOST_ROTATE_TIME + config.LOST_STOP_TIME) < config.LOST_ROTATE_TIME:
+                            command = "C" if clockwise else "K"
+                if elapsed >= search_end:
+                    status = "WAIT_UWB"
+                    state.motion_enabled = False
+            else:
+                if registered and state.robot_state == "WAIT_UWB":
+                    status = "WAIT_UWB"
+                self.reset()
 
-                new_command = "S"
+            self.last_frame_at = frame_at
+            state.robot_state = status
+            state.control_error_x = error
+            state.target_height = height
+            state.distance_zone = zone
+            state.last_direction = self.last_direction
+            state.motor_command = command
+            state.motor_command_at = now
+            state.motion_input_until = frame_at + config.VISION_STALE_TIMEOUT
+            state.motion_input_fault = "VISION_STALE"
+            state.motor_pulse_until = float("inf")
 
-            # =============================================
-            # LOST RIGHT
-            # =============================================
-            elif (
-                lost_duration
-                <
-                SEARCH_TIME +
-                LOST_TOTAL_TIME / 2.0
-            ):
 
-                phase = (
-                    lost_duration -
-                    SEARCH_TIME
-                ) % (
-                    LOST_ROTATE_TIME +
-                    LOST_STOP_TIME
-                )
-
-                new_state = (
-                    "LOST_RIGHT"
-                )
-
-                new_error = 0
-
-                if phase < LOST_ROTATE_TIME:
-                    new_command = "C"
-                else:
-                    new_command = "S"
-
-            # =============================================
-            # LOST LEFT
-            # =============================================
-            elif (
-                lost_duration
-                <
-                SEARCH_TIME +
-                LOST_TOTAL_TIME
-            ):
-
-                phase = (
-                    lost_duration -
-                    SEARCH_TIME
-                ) % (
-                    LOST_ROTATE_TIME +
-                    LOST_STOP_TIME
-                )
-
-                new_state = (
-                    "LOST_LEFT"
-                )
-
-                new_error = 0
-
-                if phase < LOST_ROTATE_TIME:
-                    new_command = "K"
-                else:
-                    new_command = "S"
-
-            # =============================================
-            # WAIT UWB
-            # =============================================
-            elif (
-                lost_duration
-                >
-                SEARCH_TIME +
-                LOST_TOTAL_TIME
-            ):
-
-                new_state = (
-                    "WAIT_UWB"
-                )
-
-                new_error = 0
-
-                new_command = "S"
-
-            # =============================================
-            # Internal Sync
-            # =============================================
-            state.virtual_error_x = (
-                new_error
-            )
-
-            state.prev_control_error = (
-                new_error
-            )
-
-            state.turning = False
-
-            state.target_height_initialized = False
-            new_target_height = 0
-            new_distance_zone = "LOST"
-
-        # =====================================================
-        # Final Update
-        # =====================================================
-        with state.control_lock:
-
-            state.control_error_x = (
-                new_error
-            )
-
-            state.robot_state = (
-                new_state
-            )
-
-            state.motor_command = (
-                new_command
-            )
-
-            state.target_height = (
-                new_target_height
-            )
-
-            state.distance_zone = (
-                new_distance_zone
-            )
-
-        time.sleep(
-            config.CONTROL_DT
-        )
+def control_thread(ranges=None):
+    follower = UwbFollower(ranges) if config.FOLLOW_MODE == "uwb" else Follower()
+    while state.running:
+        now = time.monotonic()
+        if config.FOLLOW_MODE == "uwb" and config.UWB_FRONT_GUARD:
+            expire_registration(now)
+        follower.update(now)
+        time.sleep(config.CONTROL_DT)
